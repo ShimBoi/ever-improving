@@ -97,3 +97,6 @@ class GoalEnvWrapper(ObservationWrapper, RewardWrapper, ActionWrapper, Wrapper):
 
     def compute_truncated(self, achieved_goal, desired_goal, info):
         return False  # for now??
+    
+    def __call__(self):
+        return self.env

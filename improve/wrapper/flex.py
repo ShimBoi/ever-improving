@@ -125,7 +125,7 @@ def main(cfg):
     env = rrl.make(cfg.env)
     env = HDF5LoggerWrapper(env)
 
-    for i in tqdm(range(int(2))):
+    for i in tqdm(range(int(1_000))):
         obs = env.reset()
         done = False
         while not done:

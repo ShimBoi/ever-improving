@@ -6,6 +6,7 @@ from typing import Any
 import gymnasium as gym
 import hydra
 import numpy as np
+import wandb
 import simpler_env
 from gymnasium import logger, spaces
 from gymnasium.core import (ActionWrapper, Env, ObservationWrapper,
@@ -327,7 +328,7 @@ class ResidualRLWrapper(ObservationWrapper):
             self.env.advance_to_next_subtask()
 
 
-class SB3Wrapper(ResidualRLWrapper):
+class SB3Wrapper(ResidualRLWrapper, RewardWrapper):
 
     def __init__(
         self,
@@ -377,7 +378,7 @@ class SB3Wrapper(ResidualRLWrapper):
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         if self.render_arr and self.use_wandb:
-            wandb.log({"video/buffer": wandb.Video(self.render_arr, fps=5)})
+            wandb.log({"video/buffer": wandb.Video(np.stack(self.render_arr), fps=5)})
             self.render_arr = []
         return super().reset(seed=seed, options=options)
 
@@ -407,10 +408,20 @@ class SB3Wrapper(ResidualRLWrapper):
             return self.image
         if mode == "headless":
             # to be submitted during the next reset
-            self.render_arr.append(self.image)
+            self.render_arr.append(np.transpose(self.image, (2, 0, 1)))
 
     def step(self, action):
         observation, reward, terminated, truncated, info = super().step(action)
+        
+        # large reward for succeeding
+        # if info["success"]:
+        #     reward = 200.0
+            
+        # small penalty for large actions/join velocities (1e-5)
+        
+        
+        # 0.1 * reward for shorter distance/lifting object
+        
 
         # for sb3 EvalCallback
         info["is_success"] = info["success"]

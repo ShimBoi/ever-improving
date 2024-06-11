@@ -123,6 +123,7 @@ def main(cfg):
     pprint(OC.to_container(cfg, resolve=True))  # keep after wandb so it logs
 
     env = rrl.make(cfg.env)
+    
     if cfg.env.goal.use:  # use GoalEnvWrapper?
         env = cfg.env.goal.cls(env, cfg.env.goal.key)
 

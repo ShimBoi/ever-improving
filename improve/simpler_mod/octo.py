@@ -292,10 +292,9 @@ class OctoInference:
 
         elif self.policy_setup == "widowx_bridge":
             action["gripper"] = (
-                2.0 * (raw_action["open_gripper"] > 0.5) - 1.0
+                2.0 * (raw_action["open_gripper"] > .5) - 1.0
             )  # binarize gripper action to 1 (open) and -1 (close)
             # self.gripper_is_closed = (action['gripper'] < 0.0)
-
         action["terminate_episode"] = np.array([0.0])
 
         return raw_action, action

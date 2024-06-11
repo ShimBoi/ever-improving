@@ -611,7 +611,7 @@ def preprocess_batch(batch):
 def main(cfg):
 
     device = "cuda"
-    batch_size=1
+    batch_size=256
     n_steps = 1_000
 
     model_clip, _ = clip.load(cfg.submodel.clip_backbone, device=device)
@@ -647,6 +647,7 @@ def main(cfg):
         
         batch = preprocess_batch(batch)
         
+        breakpoint()
         
         print("preprocess_batch")
         
