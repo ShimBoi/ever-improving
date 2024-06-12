@@ -12,6 +12,7 @@ obs_keys: # anything besides the expected image
   - agent_qvel
   - agent_partial-action
   - simpler-img
+  - obj-wrt-eef
 
 goal:
   use: True
@@ -22,3 +23,7 @@ residual_scale: 1
 use_original_space: ${algo.use_original_space}
 # should add foundation_key: agent_partial-action ?
 use_wandb: ${job.wandb.use}
+
+seed:
+  force: False
+  value: ${job.seed}

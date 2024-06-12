@@ -444,21 +444,6 @@ def initialize_model():
 
 
 def train(model, loader, cfg):
-    # @jay we should split the data into train and eval datasets
-    # I thing torch or sklearn has a function for that
-
-    ### remove the first 4 batches for eval
-    # for _ in range(4):
-    # batch = next(loader)
-    run = None
-    if cfg.logging:
-        fun = wandb.init(
-            project="residualrl",
-            job_type="train",
-            name=""
-        )
-
-    n_steps = 100_000
 
     model = initialize_model()
     model = torch.compile(model)

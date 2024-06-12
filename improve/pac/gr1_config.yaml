@@ -1,16 +1,29 @@
+exp:
+  wandb: true
+
 training:
   evaluate_during_training: false
   record_evaluation_video: false
   compile_model: false
-  num_epochs: 20
+  num_epochs: 0 # 20
+  num_steps: 100000
   num_sequences: 1000
   ep_len: 360
   print_steps: 100
   lr_max: 0.0009
   weight_decay: 0.0001
-  arm_loss_ratio: 100
+  arm_loss_ratio: 1 # 100
   num_warmup_epochs: 1
-  gradient_accumulation_steps: 3
+  gradient_accumulation_steps: 32 # 8
+
+eval:
+  task: widowx_put_eggplant_in_basket
+  num_eval_sequences: 100
+  ep_len: 360
+  print_steps: 100
+  save_video: false
+  save_video_path: "./save/"
+  save_video_name: "eval_video"
 
 paths:
   ckpt: "./snapshot_ABC.pt"
@@ -71,7 +84,7 @@ model_other:
 
 
 data:
-  bs_per_gpu: 4
+  bs_per_gpu: 32
   workers_per_gpu: 7
   prefetch_factor: 2
   preprocess:

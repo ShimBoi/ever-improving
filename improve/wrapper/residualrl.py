@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
 from pprint import pprint
 from typing import Any
 
 import gymnasium as gym
 import hydra
 import numpy as np
+from prompt_toolkit import HTML
+import torch
 import wandb
 import simpler_env
 from gymnasium import logger, spaces
@@ -14,43 +17,18 @@ from gymnasium.core import (ActionWrapper, Env, ObservationWrapper,
 from gymnasium.spaces.box import Box
 from gymnasium.spaces.dict import Dict
 from gymnasium.spaces.space import Space
+from mani_skill2_real2sim.utils.sapien_utils import get_entity_by_name
+from matplotlib import pyplot as plt
 from omegaconf import OmegaConf
 from omegaconf import OmegaConf as OC
 from scipy.ndimage import zoom
 from simpler_env.utils.env.observation_utils import \
     get_image_from_maniskill2_obs_dict
+from tqdm import tqdm
 
 import improve
 import improve.config.resolver
 import improve.wrapper.dict_util as du
-
-"""
-from gymnasium.envs.registration import (make, make_vec, pprint_registry,
-                                         register, register_envs, registry,
-                                         spec)
-env = gym.make(
-    "GraspSingleDummy-v0",
-    control_mode=control_mode,
-    obs_mode="rgbd",
-    robot="widowx_bridge_dataset_camera_setup",
-    sim_freq=sim_freq,
-    control_freq=control_freq,
-    max_episode_steps=50,
-    camera_cfgs={"add_segmentation": True},
-    rgb_overlay_path=f"ManiSkill2_real2sim/data/real_inpainting/bridge/bridge_{episode_id}_cleanup.png",
-    rgb_overlay_cameras=[overlay_camera],
-)
-
-
-def make(task_name):
-    assert (
-        task_name in ENVIRONMENTS
-    ), f"Task {task_name} is not supported. Environments: \n {ENVIRONMENTS}"
-    env_name, kwargs = ENVIRONMENT_MAP[task_name]
-    kwargs["prepackaged_config"] = True
-    env = gym.make(env_name, obs_mode="rgbd", **kwargs)
-    return env
-"""
 
 
 # ---------------------------------------------------------------------------- #
@@ -113,21 +91,6 @@ def alldict(thing):
         return thing
 
 
-def dict_walk(d, func):
-    """Recursively apply func to items in d."""
-
-    if isinstance(d, gym.spaces.dict.Dict):
-        return gym.spaces.dict.Dict(
-            {k: dict_walk(v, func) for k, v in d.spaces.items()}
-        )
-    elif isinstance(d, dict):
-        return {k: dict_walk(v, func) for k, v in d.items()}
-    elif isinstance(d, list):
-        return [dict_walk(item, func) for item in d]
-    else:
-        return func(d)
-
-
 class ResidualRLWrapper(ObservationWrapper):
     """Superclass of wrappers that can modify observations
     using :meth:`observation` for :meth:`reset` and :meth:`step
@@ -185,6 +148,8 @@ class ResidualRLWrapper(ObservationWrapper):
         ckpt,
         use_original_space=False,
         residual_scale=1,
+        force_seed=False,
+        seed=None,
     ):
         """Constructor for the observation wrapper."""
         Wrapper.__init__(self, env)
@@ -201,12 +166,18 @@ class ResidualRLWrapper(ObservationWrapper):
         self.use_original_space = use_original_space
         self.residual_scale = residual_scale
 
+        self.force_seed = force_seed
+        self.seed = seed
+
         model = self.build_model()
 
         obs, _ = self.env.reset(options=dict(reconfigure=True))
         self.observation_space = convert_observation_to_space(obs)
         self.image_space = convert_observation_to_space(self.get_image(obs))
         self.observation_space.spaces["simpler-img"] = self.image_space
+        self.observation_space.spaces["obj-wrt-eef"] = Box(
+            low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32
+        )
 
         self.observation_space.spaces["agent"].spaces["partial-action"] = (
             gym.spaces.Box(low=-1, high=1, shape=(7,), dtype=np.float32)
@@ -223,22 +194,24 @@ class ResidualRLWrapper(ObservationWrapper):
         else:
             raise NotImplementedError()
 
-        if self.policy == "rt1":
-            from simpler_env.policies.rt1.rt1_model import RT1Inference
+        self.model = None
+        if self.policy is not None:
+            if self.policy == "rt1":
+                from simpler_env.policies.rt1.rt1_model import RT1Inference
 
-            self.model = RT1Inference(
-                saved_model_path=self.ckpt, policy_setup=policy_setup
-            )
+                self.model = RT1Inference(
+                    saved_model_path=self.ckpt, policy_setup=policy_setup
+                )
 
-        elif "octo" in self.policy:
-            from improve.simpler_mod.octo import OctoInference
+            elif "octo" in self.policy:
+                from improve.simpler_mod.octo import OctoInference
 
-            self.model = OctoInference(
-                model_type=self.ckpt, policy_setup=policy_setup, init_rng=0
-            )
+                self.model = OctoInference(
+                    model_type=self.ckpt, policy_setup=policy_setup, init_rng=0
+                )
 
-        else:
-            raise NotImplementedError()
+            else:
+                raise NotImplementedError()
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         """Modifies the :attr:`env` after calling :meth:`reset`, returning a modified observation using :meth:`self.observation`."""
@@ -247,8 +220,13 @@ class ResidualRLWrapper(ObservationWrapper):
         self.truncated = False
         self.success = False
 
+        if self.force_seed:
+            print(f"forcing seed to {self.seed}")
+            seed = self.seed
+
         obs, info = self.env.reset(seed=seed, options=options)
-        self.model.reset(self.instruction)
+        if self.model is not None:
+            self.model.reset(self.instruction)
 
         return self.observation(obs), info
 
@@ -256,6 +234,22 @@ class ResidualRLWrapper(ObservationWrapper):
     def final(self):
         """returns whether the current subtask is the final subtask"""
         return self.env.is_final_subtask()
+
+    @property
+    def obj_pose(self):
+        """Get the center of mass (COM) pose."""
+        # self.obj.pose.transform(self.obj.cmass_local_pose)
+        return self.env.obj_pose
+
+    def get_tcp(self):
+        """tool-center point, usually the midpoint between the gripper fingers"""
+        eef = self.agent.config.ee_link_name
+        tcp = get_entity_by_name(self.agent.robot.get_links(), eef)
+        return tcp
+
+    def obj_wrt_eef(self):
+        """Get the object pose with respect to the end-effector frame"""
+        return self.obj_pose.p - self.get_tcp().pose.p
 
     @property
     def instruction(self):
@@ -289,7 +283,15 @@ class ResidualRLWrapper(ObservationWrapper):
     def observation(self, observation):
         """Returns a modified observation."""
 
+        observation["obj-wrt-eef"] = np.array(self.obj_wrt_eef())
         image = self.get_image(observation)
+        observation["simpler-img"] = image
+
+        # early return if no model
+        if self.model is None:
+            self.partial = np.zeros(7)
+            observation["agent"]["partial-action"] = self.partial
+            return observation
 
         if self.maybe_break():
             pass  # this is fine for now
@@ -302,7 +304,6 @@ class ResidualRLWrapper(ObservationWrapper):
             [action["world_vector"], action["rot_axangle"], action["gripper"]]
         )
         observation["agent"]["partial-action"] = self.partial
-        observation["simpler-img"] = image
 
         """
         # going to force observation to be just the intended image and partial for now
@@ -343,13 +344,24 @@ class SB3Wrapper(ResidualRLWrapper, RewardWrapper):
         keys=None,
         use_original_space=False,
         residual_scale=1,
+        force_seed=False,
+        seed=None,
     ):
-        super().__init__(env, task, policy, ckpt, use_original_space, residual_scale)
+        super().__init__(
+            env,
+            task,
+            policy,
+            ckpt,
+            use_original_space,
+            residual_scale,
+            force_seed,
+            seed,
+        )
         self.use_wandb = use_wandb
         self.bonus = bonus
         self.downscale = downscale
 
-        if device:
+        if device and self.model is not None:
             params = jax.device_put(self.model.params, jax.devices("gpu")[device])
             del self.model.params
             self.model.params = params
@@ -412,16 +424,22 @@ class SB3Wrapper(ResidualRLWrapper, RewardWrapper):
 
     def step(self, action):
         observation, reward, terminated, truncated, info = super().step(action)
-        
-        # large reward for succeeding
-        # if info["success"]:
-        #     reward = 200.0
             
         # small penalty for large actions/join velocities (1e-5)
-        
-        
         # 0.1 * reward for shorter distance/lifting object
-        
+        # large reward for succeeding
+        # reward = (10 * reward 
+        #         + (1e-3) * (1 - torch.tanh(sum(observation['obj-wrt-eef']))) 
+        #         - (1e-5) * sum(observation['q_vel']))
+
+        # reward function from robosuite cube pickup task
+        if info["success"]:
+            reward = 2.25
+        else:
+            reward = (1 - np.tanh(10.0 * np.linalg.norm(observation['obj-wrt-eef']))
+                    + (0.25 * info['is_grasped'])
+                    + (info['lifted_object']))    # additional lifting reward
+
 
         # for sb3 EvalCallback
         info["is_success"] = info["success"]
@@ -477,6 +495,8 @@ def make(cn):
         downscale=cn.downscale,
         keys=cn.obs_keys,
         use_original_space=cn.use_original_space,
+        force_seed=cn.seed.force,
+        seed=cn.seed.value if cn.seed.force else None,
     )
 
 
@@ -491,45 +511,61 @@ def main(cfg):
     warnings.filterwarnings("ignore", category=FutureWarning)
 
     env = make(cfg.env)
-    things = env.reset()
-    # print(things[-1])
+    obs, info = env.reset()
 
-    print(env.observation_space.sample)
-    quit()
+    eefs, objs, dists = [], [], []
+    
+    import imageio
+    from IPython.display import HTML, Video
+    from io import BytesIO
+    
+    success = False
+    while not success:
+        obs, info = env.reset()
 
-    hist = {t: 0 for t in simpler_env.ENVIRONMENTS if "widowx" in t}
-    allinstructions = set()
-    for t in hist:
+        # print(info)
+        images = []
+        for i in tqdm(range(120)):
 
-        env = make(**cfg, kind="sb3")
+            zeros = np.zeros(env.action_space.shape)
+            # randoms = env.action_space.sample()
+            observation, reward, success, truncated, info = env.step(0)
 
-        for _ in range(10):
-            env.reset()
-            for i in range(2000):
+            print("reward", reward)
+            print("lifted object", info['lifted_object'])
+            print("grabbed object", info['is_grasped'])
+            
+            print("\nsuccess", success)
 
-                # zero action
-                action = np.zeros(env.action_space.shape)
-                # random action
-                # env.action_space.sample()
+            # print(f"{i:003}", reward, success, truncated)
+            # eefs.append(env.get_tcp().pose.p)
+            # objs.append(env.obj_pose.p)
+            # dists.append(env.obj_wrt_eef())
 
-                observation, reward, success, truncated, info = env.step(action)
+            if truncated:  # or success:
+                break
+    
 
-                # print i as formatted for 3 decimals 001 - 100
-                print(f"{i:003}", reward, success, truncated)
+    # fig, axs = plt.subplots(3, 1, figsize=(10, 10))
+    # eefs = np.array(eefs)
+    # objs = np.array(objs)
+    # dists = np.array(dists)
+    # names = ["x", "y", "z"]
 
-                allinstructions.add(env.instruction)
-                if not (env.instruction in allinstructions):
-                    print(env.instruction)
+    # for i in range(3):
+    #     axs[i].plot(eefs[:, i], label="eef")
+    #     axs[i].plot(objs[:, i], label="obj")
+    #     axs[i].plot(dists[:, i], label="obj wrt eef")
 
-                if truncated:  # or success:
-                    break
+    #     axs[i].set_title(names[i])
+    #     axs[i].legend()
 
-            if success:
-                hist[t] += 1
-            pprint(hist)
+    #     axs[i].axhline(0, color="red", linestyle="--")
+    #     # axs[i].set_ylim(-1, 1)
 
-        env.close()
-    print(allinstructions)
+    # env.close()
+    # plt.savefig("obj_wrt_eef.png")
+    # plt.show()
 
 
 if __name__ == "__main__":

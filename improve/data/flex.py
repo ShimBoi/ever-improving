@@ -2,7 +2,10 @@ import functools
 import os
 import os.path as osp
 import random
+<<<<<<< HEAD
 from collections import defaultdict
+=======
+>>>>>>> upstream_main
 from multiprocessing import Lock
 from pprint import pprint
 
@@ -29,7 +32,11 @@ class HDF5Dataset(Dataset):
 
         self.root_dir = root_dir
 
+<<<<<<< HEAD
         self.fnames = [osp.join(root_dir, "dataset_ckpt.h5")]
+=======
+        self.fnames = [osp.join(root_dir, "dataset.h5")]
+>>>>>>> upstream_main
         self.n_steps = n_steps
 
         # shuffle the dataset using seq length
@@ -49,7 +56,14 @@ class HDF5Dataset(Dataset):
 
                     # add remaining windows to idxs
                     offset = random.randint(0, rem)
+<<<<<<< HEAD
 
+=======
+                    idxs += [
+                        (episode, (i, i + seq_len))
+                        for i in range(0, episode_len - rem, seq_len)
+                    ]
+>>>>>>> upstream_main
                     for i in range(n):
                         idxs.append((episode, (offset + i, offset + i + seq_len)))
 
@@ -62,10 +76,22 @@ class HDF5Dataset(Dataset):
             if isinstance(data, np.ndarray):
                 return torch.from_numpy(data)
             else:
+<<<<<<< HEAD
                 return torch.tensor(data)
 
         elif isinstance(h, (int, float, bool, str)):
             return torch.tensor(h)
+=======
+                return HDF5Dataset.to_tensor(data)
+
+        if isinstance(h, (int, float, bool)):
+            return torch.tensor(h)
+        if isinstance(h, (np.ndarray, np.generic)):
+            return torch.tensor(h)
+        if isinstance(h, bytes):
+            return torch.tensor(list(h), dtype=torch.uint8)
+
+>>>>>>> upstream_main
         else:
             raise TypeError(f"Unsupported type: {type(h)}")
 
@@ -86,17 +112,32 @@ class HDF5Dataset(Dataset):
                 steps = list(f[episode]["steps"].keys())
                 steps.sort(key=lambda x: int(x.split("_")[1]))
 
+<<<<<<< HEAD
+=======
+                will_succeed = HDF5Dataset.extract(f["dataset_info"][episode])['success']
+
+>>>>>>> upstream_main
                 trajectory = []
                 for key in steps[start:end]:
                     step = f[episode]["steps"][key]
                     trajectory.append(HDF5Dataset.extract(step))
 
+<<<<<<< HEAD
                 trajectory = [
                     du.apply(x, lambda x: torch.unsqueeze(x, 0)) for x in trajectory
                 ]
                 return functools.reduce(
                     lambda a, b: apply_both(a, b, torch.cat), trajectory
                 )
+=======
+                trajectory = [du.apply(x, lambda x: x.unsqueeze(0)) for x in trajectory]
+                trajectory =  functools.reduce(
+                    lambda a, b: apply_both(a, b, lambda x, y: torch.cat([x, y])),
+                    trajectory,
+                )
+                trajectory['info']['will_succeed'] = will_succeed.repeat(self.n_steps, 1)
+                return trajectory 
+>>>>>>> upstream_main
 
 
 class HDF5IterDataset(IterableDataset):
@@ -192,8 +233,8 @@ def inspect(data):
 
 def main():
 
-    n_success = 0
-    n = 0
+    # n_success = 0
+    # n = 0
 
     D = HDF5Dataset(DATA_DIR, n_steps=10)
     #
@@ -210,6 +251,7 @@ def main():
     # breakpoint()
 
     # D = HDF5IterDataset(DATA_DIR, loop=False, n_steps=10)
+<<<<<<< HEAD
     # D = HDF5IterDataset(DATA_DIR, loop=False, n_steps=10)
     # dataset = Dataloader(D, batch_size=99, num_workers=4)
 
@@ -219,6 +261,24 @@ def main():
 
     # for data in dataset:
     # print(data)
+=======
+    D = HDF5Dataset(DATA_DIR, n_steps=10)
+    loader = Dataloader(D, batch_size=64, num_workers=4, shuffle=True)
+
+    batch = next(iter(loader))
+    print(batch['info']['will_succeed'].view(-1))
+    print(batch['info']['will_succeed'].shape)
+    quit()
+
+    print(len(D))
+    quit()
+
+    print(du.apply(batch, lambda x: x.shape))
+    quit()
+
+    for data in loader:
+        print(data)
+>>>>>>> upstream_main
 
     # print(D.fnames)
     # for data in D:
