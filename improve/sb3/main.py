@@ -1,17 +1,26 @@
 import os
+import math
 import os.path as osp
 import warnings
 from functools import partial
 from pprint import pprint
 
 import gymnasium as gym
+# from improve.wrapper.probe import ProbeEnv
 import hydra
+import improve
+import improve.config.prepare
+import improve.config.resolver
 import mediapy as media
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
+from improve.sb3 import util
+from improve.sb3.custom.sac import SAC
+from improve.sb3.util import MyCallback, ReZeroCallback, WandbLogger
+from improve.wrapper import residualrl as rrl
 from omegaconf import OmegaConf
 from omegaconf import OmegaConf as OC
 from stable_baselines3 import A2C, PPO, HerReplayBuffer
@@ -22,13 +31,7 @@ from stable_baselines3.common.vec_env.vec_transpose import VecTransposeImage
 from tqdm import tqdm
 from wandb.integration.sb3 import WandbCallback
 
-import improve
-import improve.config.prepare
-import improve.config.resolver
-from improve.sb3 import util
-from improve.sb3.custom.sac import SAC
-from improve.sb3.util import MyCallback, ReZeroCallback, WandbLogger
-from improve.wrapper import residualrl as rrl
+from improve.wrapper.normalize import NormalizeObservation, NormalizeReward
 
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -57,6 +60,14 @@ def build_callbacks(env, cfg):
     )
 
     callbacks = [checkpoint_callback, eval_callback]
+
+    if cfg.job.wandb.use:
+        wandbCb = callback = WandbCallback(
+            gradient_save_freq=1,
+            log="gradients",
+            verbose=2,
+        )
+        callbacks += [wandbCb]
 
     if cfg.callback.rezero.use:
         rezero = ReZeroCallback(
@@ -107,14 +118,16 @@ def rollout(model):
         wandb.log({f"video/{ep_id}": wandb.Video(fname, fps=5)})
 
 
-
-@hydra.main(config_path=improve.CONFIG, config_name="config")
+@hydra.main(config_path=improve.CONFIG, config_name="config", version_base="1.3.2")
 def main(cfg):
 
     if cfg.job.wandb.use:
         wandb.init(
             project="residualrl",
+            dir=cfg.callback.log_path,
             job_type="train",
+            # sync_tensorboard=True,
+            monitor_gym=True,
             name=cfg.job.wandb.name,
             group=cfg.job.wandb.group,
             tags=[t for t in cfg.job.wandb.tags],
@@ -123,7 +136,8 @@ def main(cfg):
     pprint(OC.to_container(cfg, resolve=True))  # keep after wandb so it logs
 
     env = rrl.make(cfg.env)
-    
+    env = NormalizeObservation(NormalizeReward(env))
+
     if cfg.env.goal.use:  # use GoalEnvWrapper?
         env = cfg.env.goal.cls(env, cfg.env.goal.key)
 
@@ -133,23 +147,40 @@ def main(cfg):
         )
     else:
         learning_rate = cfg.algo.learning_rate
-    del cfg.algo.learning_rate
 
     # from torch.optim.lr_scheduler import CosineAnnealingLR
+    def cosine_lr_schedule(initial_lr, min_lr, total_steps, current_step):
+        cosine_decay = 0.5 * (1 + math.cos(math.pi * current_step / total_steps))
+        decayed_lr = (initial_lr - min_lr) * cosine_decay + min_lr
+        return decayed_lr
+
+    coslr = partial(cosine_lr_schedule, cfg.algo.learning_rate, 1e-6, cfg.train.n_steps)
+    del cfg.algo.learning_rate
+    betas = (0.999, 0.999)
 
     # TODO add cosine schedule
     # not priority
     # torch lr schedule as cosine lr schedule
     algo = build_algo(cfg.algo)
     algo_kwargs = OC.to_container(cfg.algo, resolve=True)
+    policy_kwargs = algo_kwargs.get("policy_kwargs", {})
     del algo_kwargs["name"]
+    del algo_kwargs["policy_kwargs"]
 
     model = algo(
         "MultiInputPolicy",
         env,
         verbose=1,
         **algo_kwargs,
-        learning_rate=learning_rate,
+        policy_kwargs={
+            "optimizer_kwargs": {
+                "betas": betas,
+                "weight_decay": 1e-4,
+                # "lr_schedule": coslr, ... doesnt seem to accept
+            },
+            **policy_kwargs,
+        },
+        learning_rate=coslr,
     )
 
     if cfg.train.use_zero_init:

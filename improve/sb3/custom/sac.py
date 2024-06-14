@@ -272,7 +272,10 @@ class SAC(CHEF):
             current_q_values = self.critic(replay_data.observations, replay_data.actions)
 
             # Compute critic loss
+            
+            ### TODO: change the critic loss back
             critic_loss = 0.5 * sum(F.mse_loss(current_q, target_q_values) for current_q in current_q_values)
+            # critic_loss = 0.5 * sum(F.mse_loss(current_q, target_q) for current_q, target_q in zip(current_q_values, target_q_values)) / len(current_q_values)
             assert isinstance(critic_loss, th.Tensor)  # for type checker
             critic_losses.append(critic_loss.item())  # type: ignore[union-attr]
 

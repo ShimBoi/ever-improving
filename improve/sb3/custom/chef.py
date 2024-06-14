@@ -437,6 +437,9 @@ class CHEF(BaseAlgorithm):
         self.logger.record("time/fps", fps)
         self.logger.record("time/time_elapsed", int(time_elapsed), exclude="tensorboard")
         self.logger.record("time/total_timesteps", self.num_timesteps, exclude="tensorboard")
+        
+        # log information abt the reward
+        
         if self.use_sde:
             self.logger.record("train/std", (self.actor.get_std()).mean().item())
 

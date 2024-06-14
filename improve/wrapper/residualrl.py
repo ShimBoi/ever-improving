@@ -1,16 +1,20 @@
 from __future__ import annotations
 
-import base64
+import os
+import os.path as osp
+from datetime import datetime
 from pprint import pprint
 from typing import Any
 
 import gymnasium as gym
 import hydra
+import improve
+import improve.config.resolver
+import improve.wrapper.dict_util as du
+import mediapy
 import numpy as np
-from prompt_toolkit import HTML
-import torch
-import wandb
 import simpler_env
+import wandb
 from gymnasium import logger, spaces
 from gymnasium.core import (ActionWrapper, Env, ObservationWrapper,
                             RewardWrapper, Wrapper)
@@ -25,10 +29,6 @@ from scipy.ndimage import zoom
 from simpler_env.utils.env.observation_utils import \
     get_image_from_maniskill2_obs_dict
 from tqdm import tqdm
-
-import improve
-import improve.config.resolver
-import improve.wrapper.dict_util as du
 
 
 # ---------------------------------------------------------------------------- #
@@ -175,12 +175,29 @@ class ResidualRLWrapper(ObservationWrapper):
         self.observation_space = convert_observation_to_space(obs)
         self.image_space = convert_observation_to_space(self.get_image(obs))
         self.observation_space.spaces["simpler-img"] = self.image_space
+
+        # other low dim obs
+        qpos = obs["agent"]["qpos"]
+        self.observation_space.spaces["agent"]["qpos-sin"] = Box(
+            low=-np.inf, high=np.inf, shape=qpos.shape, dtype=np.float32
+        )
+        self.observation_space.spaces["agent"]["qpos-cos"] = Box(
+            low=-np.inf, high=np.inf, shape=qpos.shape, dtype=np.float32
+        )
+
         self.observation_space.spaces["obj-wrt-eef"] = Box(
             low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32
         )
+        self.observation_space.spaces["eef-pose"] = Box(
+            low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32
+        )
+        self.observation_space.spaces["obj-pose"] = Box(
+            low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32
+        )
 
+        # agent partial action
         self.observation_space.spaces["agent"].spaces["partial-action"] = (
-            gym.spaces.Box(low=-1, high=1, shape=(7,), dtype=np.float32)
+            gym.spaces.Box(low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32)
         )
 
     def build_model(self):
@@ -245,6 +262,7 @@ class ResidualRLWrapper(ObservationWrapper):
         """tool-center point, usually the midpoint between the gripper fingers"""
         eef = self.agent.config.ee_link_name
         tcp = get_entity_by_name(self.agent.robot.get_links(), eef)
+        print(tcp.pose.p)
         return tcp
 
     def obj_wrt_eef(self):
@@ -283,7 +301,16 @@ class ResidualRLWrapper(ObservationWrapper):
     def observation(self, observation):
         """Returns a modified observation."""
 
+        # add sin and cos of qpos
+        qpos = observation["agent"]["qpos"]
+        observation["agent"]["qpos-sin"] = np.sin(qpos)
+        observation["agent"]["qpos-cos"] = np.cos(qpos)
+        # eef and obj pose
+        tcp, obj = self.get_tcp().pose, self.obj_pose
+        observation["eef-pose"] = np.array([*tcp.p, *tcp.q])
+        observation["obj-pose"] = np.array([*obj.p, *obj.q])
         observation["obj-wrt-eef"] = np.array(self.obj_wrt_eef())
+
         image = self.get_image(observation)
         observation["simpler-img"] = image
 
@@ -329,7 +356,9 @@ class ResidualRLWrapper(ObservationWrapper):
             self.env.advance_to_next_subtask()
 
 
-class SB3Wrapper(ResidualRLWrapper, RewardWrapper):
+class SB3Wrapper(ResidualRLWrapper):
+
+    metadata = {"render_modes": ["rgb_array", "human"], "render_fps": 5}
 
     def __init__(
         self,
@@ -337,7 +366,6 @@ class SB3Wrapper(ResidualRLWrapper, RewardWrapper):
         task,
         policy,
         ckpt,
-        bonus=False,
         use_wandb=False,
         downscale=None,
         device=None,
@@ -346,6 +374,7 @@ class SB3Wrapper(ResidualRLWrapper, RewardWrapper):
         residual_scale=1,
         force_seed=False,
         seed=None,
+        _reward_type="sparse",
     ):
         super().__init__(
             env,
@@ -357,8 +386,9 @@ class SB3Wrapper(ResidualRLWrapper, RewardWrapper):
             force_seed,
             seed,
         )
+
         self.use_wandb = use_wandb
-        self.bonus = bonus
+        self._reward_type = _reward_type
         self.downscale = downscale
 
         if device and self.model is not None:
@@ -373,7 +403,7 @@ class SB3Wrapper(ResidualRLWrapper, RewardWrapper):
         self.keys = keys
 
         self.observation_space = Dict(spaces)
-        if self.downscale:
+        if self.downscale and "simpler-img" in self.keys:
 
             sample = self.observation_space.spaces["simpler-img"].sample()
             shape = self.scale_image(
@@ -386,12 +416,41 @@ class SB3Wrapper(ResidualRLWrapper, RewardWrapper):
             )
 
         self.image = None
-        self.render_arr = []
+        self.images = []
+        self.render_every = 55
+        self.render_counter = 0
+        self.ep_delta_reward = 0.0
+        self.ep_grasp_reward = 0.0
+        self.prev_distance = None
+
+    def finish_render(self):
+        if self.images and self.use_wandb:
+            n = self.render_counter % self.render_every
+            now = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            now = datetime.now().strftime("%Y-%m-%d")
+
+            dirname = osp.join(improve.RESULTS, now)
+            # os.makedirs(osp.dirname(dirname), exist_ok=True)
+            path = f"ep_{n}_success-.mp4"
+            # path = osp.join(dirname, path)
+
+            mediapy.write_video(path, self.images, fps=5)
+
+            wandb.log(
+                {f"video/buffer{n}": wandb.Video(path, fps=5)},
+                # step=self.nstep,
+            )
+            self.images = []
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
-        if self.render_arr and self.use_wandb:
-            wandb.log({"video/buffer": wandb.Video(np.stack(self.render_arr), fps=5)})
-            self.render_arr = []
+        self.images = []
+        self.render_counter += 1
+        if wandb.run is not None:
+            wandb.log({"reward/delta": self.ep_delta_reward})
+            wandb.log({"reward/grasp": self.ep_grasp_reward})
+        self.ep_delta_reward = 0.0
+        self.ep_grasp_reward = 0.0
+        self.prev_distance = None
         return super().reset(seed=seed, options=options)
 
     def scale_image(self, image, scale):
@@ -404,52 +463,96 @@ class SB3Wrapper(ResidualRLWrapper, RewardWrapper):
     def observation(self, observation):
         observation = super().observation(observation)
         observation = du.flatten(alldict(observation))
+        self.image = observation["simpler-img"]  # for render only
         observation = {k: v for k, v in observation.items() if k in self.keys}
 
-        self.image = observation["simpler-img"]  # for render
+        if self.downscale and "simpler-img" in self.keys:
+            observation["simpler-img"] = self.scale_image(
+                self.image, 1 / self.downscale
+            )
 
-        # scale image !!! doesnt return the scaled image
-        if self.downscale:
-            self.image = self.scale_image(self.image, 1 / self.downscale)
-
-        observation["simpler-img"] = self.image
         return observation
 
-    def render(self, mode="headless"):
-        if mode == "rgb_array":
+    def render(self, mode=None):
+        if mode == "human":
+            plt.imshow(self.image)
+            plt.title("SIMPLER")
+            plt.pause(0.1)
+        else:
+            self.images.append(self.image)
             return self.image
-        if mode == "headless":
-            # to be submitted during the next reset
-            self.render_arr.append(np.transpose(self.image, (2, 0, 1)))
+
+    def compute_reward(self, observation, action, reward, terminated, truncated, info):
+        """Compute the reward."""
+
+        if self._reward_type == "sparse":
+            return reward
+
+        if self._reward_type == "transic":  # but customized
+            # small penalty for large actions/join velocities (1e-5)
+            # 0.1 * reward for shorter distance/lifting object
+            # large reward for succeeding
+            return (
+                10 * reward
+                + ((0.1) * (1 - np.tanh(10 * np.linalg.norm(observation["obj-wrt-eef"]))))
+                + int(info["lifted_object"])
+                + (0.25 * info["is_grasped"])
+                + ((1e-3) * sum(observation["agent_qvel"]))
+                + ((1e-3) * sum(action) if self.model is not None else 0) # RP shouldnt help too much
+            )
+
+        if self._reward_type == "robosuite":
+            # reward function from robosuite cube pickup task
+            if info["success"]:
+                return 2.25
+            else:
+                return (
+                    1
+                    - np.tanh(10.0 * np.linalg.norm(observation["obj-wrt-eef"]))
+                    + (0.25 * info["is_grasped"])
+                    + (info["lifted_object"])
+                )  # additional lifting reward
+                
+        if self._reward_type == "reach":
+            alpha = 1.5
+            step_penalty = 0.005
+            curr_distance = np.linalg.norm(observation["obj-wrt-eef"])
+            # print(curr_distance)
+            
+            if self.prev_distance is None:
+                reward = 0
+            elif curr_distance < 0.08:
+                reward = 10
+            else:
+                reward = alpha * (self.prev_distance - curr_distance) 
+                        #  - step_penalty * info['elapsed_steps']/80)
+                self.ep_delta_reward += reward
+                # print(f"prev_distance: {self.prev_distance}, curr_distance: {curr_distance}")
+                # print(f"delta: {self.prev_distance-curr_distance}, penalty: {step_penalty * info['elapsed_steps']/80}, reward: {reward}")
+            # print(observation['obj-wrt-eef'])
+            # print(f"reward: {reward} curr_distance: {curr_distance} prev_distance: {self.prev_distance}")
+            self.prev_distance = curr_distance
+
+        return reward
 
     def step(self, action):
         observation, reward, terminated, truncated, info = super().step(action)
-            
-        # small penalty for large actions/join velocities (1e-5)
-        # 0.1 * reward for shorter distance/lifting object
-        # large reward for succeeding
-        # reward = (10 * reward 
-        #         + (1e-3) * (1 - torch.tanh(sum(observation['obj-wrt-eef']))) 
-        #         - (1e-5) * sum(observation['q_vel']))
-
-        # reward function from robosuite cube pickup task
-        if info["success"]:
-            reward = 2.25
-        else:
-            reward = (1 - np.tanh(10.0 * np.linalg.norm(observation['obj-wrt-eef']))
-                    + (0.25 * info['is_grasped'])
-                    + (info['lifted_object']))    # additional lifting reward
-
+        reward = self.compute_reward(
+            observation, action, reward, terminated, truncated, info
+        )
+        
+        if reward == 10:
+            terminated = True
+            self.ep_grasp_reward = 10
+            info["success"] = True
 
         # for sb3 EvalCallback
         info["is_success"] = info["success"]
 
-        if self.bonus:
-            val = 0.01
-            stats = info["episode_stats"].keys()
-            bonus = [info[k] for k in stats]
-            bonus = [val if b else 0 for b in bonus]
-            reward += sum(bonus)
+        self.render()
+        # print(f'{terminated or truncated } {(self.render_counter % self.render_every)}')
+        if terminated or truncated and (self.render_counter % self.render_every) < 10:
+            self.finish_render()
 
         return observation, reward, terminated, truncated, info
 
@@ -482,7 +585,10 @@ def make(cn):
     """Creates simulated eval environment from task name.
     param: cn: config node
     """
-    env = simpler_env.make(cn.task)
+    env = simpler_env.make(
+        cn.task,
+        # **{ "renderer_kwargs": { "device": "cuda:0", "offscreen_only": True, } },
+    )
     wrapper = SB3Wrapper if cn.kind == "sb3" else ResidualRLWrapper
 
     return wrapper(
@@ -490,13 +596,13 @@ def make(cn):
         cn.task,
         cn.foundation.name,
         cn.foundation.ckpt,
-        bonus=cn.bonus,
         use_wandb=cn.use_wandb,
         downscale=cn.downscale,
         keys=cn.obs_keys,
         use_original_space=cn.use_original_space,
         force_seed=cn.seed.force,
         seed=cn.seed.value if cn.seed.force else None,
+        _reward_type=cn.reward,
     )
 
 
@@ -514,57 +620,49 @@ def main(cfg):
     obs, info = env.reset()
 
     eefs, objs, dists = [], [], []
-    
-    import imageio
-    from IPython.display import HTML, Video
-    from io import BytesIO
-    
-    success = False
-    while not success:
-        obs, info = env.reset()
+    # for _ in range(5):
 
-        # print(info)
-        images = []
-        for i in tqdm(range(120)):
+    #     # randoms = env.action_space.sample()
 
-            zeros = np.zeros(env.action_space.shape)
-            # randoms = env.action_space.sample()
-            observation, reward, success, truncated, info = env.step(0)
+    #     observation, reward, success, truncated, info = env.step(env.action_space.sample() *)
+    #     # print(observation)
 
-            print("reward", reward)
-            print("lifted object", info['lifted_object'])
-            print("grabbed object", info['is_grasped'])
-            
-            print("\nsuccess", success)
+    # quit()
+    # print(info)
 
-            # print(f"{i:003}", reward, success, truncated)
-            # eefs.append(env.get_tcp().pose.p)
-            # objs.append(env.obj_pose.p)
-            # dists.append(env.obj_wrt_eef())
+    for i in tqdm(range(120)):
 
-            if truncated:  # or success:
-                break
-    
+        zeros = np.zeros(env.action_space.shape)
+        randoms = env.action_space.sample()
+        observation, reward, success, truncated, info = env.step(randoms)
 
-    # fig, axs = plt.subplots(3, 1, figsize=(10, 10))
-    # eefs = np.array(eefs)
-    # objs = np.array(objs)
-    # dists = np.array(dists)
-    # names = ["x", "y", "z"]
+        # print(f"{i:003}", reward, success, truncated)
+        eefs.append(env.get_tcp().pose.p)
+        objs.append(env.obj_pose.p)
+        dists.append(env.obj_wrt_eef())
 
-    # for i in range(3):
-    #     axs[i].plot(eefs[:, i], label="eef")
-    #     axs[i].plot(objs[:, i], label="obj")
-    #     axs[i].plot(dists[:, i], label="obj wrt eef")
+        if truncated:  # or success:
+            break
 
-    #     axs[i].set_title(names[i])
-    #     axs[i].legend()
+    fig, axs = plt.subplots(3, 1, figsize=(10, 10))
+    eefs = np.array(eefs)
+    objs = np.array(objs)
+    dists = np.array(dists)
+    names = ["x", "y", "z"]
 
-    #     axs[i].axhline(0, color="red", linestyle="--")
-    #     # axs[i].set_ylim(-1, 1)
+    for i in range(3):
+        axs[i].plot(eefs[:, i], label="eef")
+        axs[i].plot(objs[:, i], label="obj")
+        axs[i].plot(dists[:, i], label="obj wrt eef")
 
-    # env.close()
-    # plt.savefig("obj_wrt_eef.png")
+        axs[i].set_title(names[i])
+        axs[i].legend()
+
+        axs[i].axhline(0, color="red", linestyle="--")
+        # axs[i].set_ylim(-1, 1)
+
+    env.close()
+    plt.savefig("obj_wrt_eef(2).png")
     # plt.show()
 
 
