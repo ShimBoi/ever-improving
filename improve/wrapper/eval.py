@@ -83,6 +83,11 @@ class EvalWrapper(Wrapper):
                     {f"video/buffer{self.n_reset}": wandb.Video(path, fps=5)},
                     step=self.nstep,
                 )
+                # video = mediapy.to_float(self.render_arr)
+                # wandb.log(
+                #     {f"video/buffer{self.n_reset}": wandb.Video(video, fps=5, format="gif")},
+                #     step=self.nstep,
+                # )
 
     @property
     def instruction(self):

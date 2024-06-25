@@ -6,7 +6,7 @@ from functools import partial
 from pprint import pprint
 
 import gymnasium as gym
-# from improve.wrapper.probe import ProbeEnv
+from improve.wrapper.probe import ProbeEnv
 import hydra
 import improve
 import improve.config.prepare
@@ -90,7 +90,7 @@ def build_algo(_cfg):
 
 
 def rollout(model):
-
+    breakpoint()
     for ep_id in range(1):
 
         images = []

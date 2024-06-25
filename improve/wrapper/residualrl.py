@@ -262,7 +262,6 @@ class ResidualRLWrapper(ObservationWrapper):
         """tool-center point, usually the midpoint between the gripper fingers"""
         eef = self.agent.config.ee_link_name
         tcp = get_entity_by_name(self.agent.robot.get_links(), eef)
-        print(tcp.pose.p)
         return tcp
 
     def obj_wrt_eef(self):
@@ -417,30 +416,38 @@ class SB3Wrapper(ResidualRLWrapper):
 
         self.image = None
         self.images = []
-        self.render_every = 55
+        self.render_every = 50
         self.render_counter = 0
         self.ep_delta_reward = 0.0
         self.ep_grasp_reward = 0.0
         self.prev_distance = None
 
     def finish_render(self):
-        if self.images and self.use_wandb:
-            n = self.render_counter % self.render_every
-            now = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-            now = datetime.now().strftime("%Y-%m-%d")
+        pass
+        # if self.images and self.use_wandb:
+        #     n = self.render_counter % self.render_every
+        #     now = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        #     now = datetime.now().strftime("%Y-%m-%d")
 
-            dirname = osp.join(improve.RESULTS, now)
-            # os.makedirs(osp.dirname(dirname), exist_ok=True)
-            path = f"ep_{n}_success-.mp4"
-            # path = osp.join(dirname, path)
+        #     dirname = osp.join(improve.RESULTS, now)
+        #     # os.makedirs(osp.dirname(dirname), exist_ok=True)
+        #     path = f"ep_{n}_success-.mp4"
+        #     # path = osp.join(dirname, path)
 
-            mediapy.write_video(path, self.images, fps=5)
+        #     mediapy.write_video(path, self.images, fps=5)
 
-            wandb.log(
-                {f"video/buffer{n}": wandb.Video(path, fps=5)},
-                # step=self.nstep,
-            )
-            self.images = []
+        #     wandb.log(
+        #         {f"video/buffer{n}": wandb.Video(path, fps=5)},
+        #         # step=self.nstep,
+        #     )
+        #     # n = self.render_counter % self.render_every
+        #     # # breakpoint()
+        #     # # video = mediapy.to_float(self.images)
+        #     # wandb.log(
+        #     #     {f"video/buffer{n}": wandb.Video(np.array(self.images), fps=5, format="gif")},
+        #     #     # step=self.nstep,
+        #     # )
+        #     self.images = []
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         self.images = []
@@ -514,8 +521,6 @@ class SB3Wrapper(ResidualRLWrapper):
                 )  # additional lifting reward
                 
         if self._reward_type == "reach":
-            alpha = 1.5
-            step_penalty = 0.005
             curr_distance = np.linalg.norm(observation["obj-wrt-eef"])
             # print(curr_distance)
             
@@ -524,9 +529,9 @@ class SB3Wrapper(ResidualRLWrapper):
             elif curr_distance < 0.08:
                 reward = 10
             else:
-                reward = alpha * (self.prev_distance - curr_distance) 
+                reward = self.prev_distance - curr_distance
                         #  - step_penalty * info['elapsed_steps']/80)
-                self.ep_delta_reward += reward
+                self.ep_delta_reward = reward
                 # print(f"prev_distance: {self.prev_distance}, curr_distance: {curr_distance}")
                 # print(f"delta: {self.prev_distance-curr_distance}, penalty: {step_penalty * info['elapsed_steps']/80}, reward: {reward}")
             # print(observation['obj-wrt-eef'])
@@ -636,13 +641,21 @@ def main(cfg):
         randoms = env.action_space.sample()
         observation, reward, success, truncated, info = env.step(randoms)
 
+        print("reward", reward, "success", success, "truncated", truncated)
+        
+        plt.imshow(env.render())
+        plt.pause(0.1)
+        # plt.close()
         # print(f"{i:003}", reward, success, truncated)
-        eefs.append(env.get_tcp().pose.p)
-        objs.append(env.obj_pose.p)
-        dists.append(env.obj_wrt_eef())
+        # eefs.append(env.get_tcp().pose.p)
+        # objs.append(env.obj_pose.p)
+        # dists.append(env.obj_wrt_eef())
 
         if truncated:  # or success:
             break
+        
+    
+    quit()
 
     fig, axs = plt.subplots(3, 1, figsize=(10, 10))
     eefs = np.array(eefs)

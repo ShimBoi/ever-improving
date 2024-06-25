@@ -1,0 +1,57 @@
+# @package _global_
+
+# help with sweepers
+# https://stackoverflow.com/questions/70619014/specify-hydra-multirun-sweeps-in-a-config-file
+# https://github.com/facebookresearch/hydra/issues/1376#issuecomment-1011704938
+
+defaults:
+# - /launcher: base
+  - override /algo: ppo
+  - override /buffer: base # no HER for now!
+  - override /env/foundation: dont
+
+  - _self_
+
+log_dir: ${callback.log_path}
+sweep_id: "jun13_ppo"
+
+train: 
+  n_steps: ${r_toint:3e5} # 300k
+  use_zero_init: False # cant zero without foundation model
+
+algo:
+  batch_size: 256
+  # warmup_zero_action: False # gaussian
+
+  # SUPER low LR
+  # learning_rate: ${r_tofloat:1e-6}
+
+env:
+  goal: 
+    use: False
+  seed:
+    force: True # only one environment starting point for now
+  use_original_space: False # ppo doesnt support this rn
+
+  obs_keys: # anything besides the expected image
+    - agent_qpos-sin
+    - agent_qpos-cos
+    - agent_qvel
+    - eef-pose
+    - obj-wrt-eef
+    - obj-pose
+
+hydra:
+  run:
+    dir: ${log_dir}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${log_dir}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.override_dirname}
+
+  mode: MULTIRUN # needed or else -m flag
+  sweeper:
+    params:
+      algo.learning_rate: 3e-4,1e-4,1e-6,5e-5
+      algo.target_kl: 0.001,0.01,0.02,0.05
+      env.reward: sparse,transic
+      algo.ent_coef: 0,0.01
