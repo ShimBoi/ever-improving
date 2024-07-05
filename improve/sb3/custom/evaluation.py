@@ -2,7 +2,7 @@ import warnings
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import gymnasium as gym
-from improve.wrapper.residualrl import SB3Wrapper
+# from improve.wrapper.residualrl import SB3Wrapper
 import numpy as np
 
 from stable_baselines3.common import type_aliases

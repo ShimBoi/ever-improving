@@ -5,6 +5,7 @@ custom SAC implementation
 
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
+from improve.sb3.custom.policy_residual import OffPolicyResidual, AlgoCN, FoundationModelCN
 import numpy as np
 import torch as th
 from gymnasium import spaces
@@ -18,12 +19,10 @@ from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedul
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
 from stable_baselines3.sac.policies import Actor, CnnPolicy, MlpPolicy, MultiInputPolicy, SACPolicy
 
-from improve.sb3.custom.chef import CHEF
-
 SelfSAC = TypeVar("SelfSAC", bound="SAC")
 
 
-class SAC(CHEF):
+class SAC(OffPolicyResidual):
     """
     Soft Actor-Critic (SAC)
     Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor,
@@ -123,39 +122,45 @@ class SAC(CHEF):
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
-        #
         use_original_space=False, # use original action space?
         warmup_zero_action=False, # zero action or gaussian noise before learning starts
+        foundationCN=None
     ):
+        
+        
         super().__init__(
             policy,
             env,
-            learning_rate,
-            buffer_size,
-            learning_starts,
-            batch_size,
-            tau,
-            gamma,
-            train_freq,
-            gradient_steps,
-            action_noise,
-            replay_buffer_class=replay_buffer_class,
-            replay_buffer_kwargs=replay_buffer_kwargs,
-            policy_kwargs=policy_kwargs,
-            stats_window_size=stats_window_size,
-            tensorboard_log=tensorboard_log,
-            verbose=verbose,
-            device=device,
-            seed=seed,
-            use_sde=use_sde,
-            sde_sample_freq=sde_sample_freq,
-            use_sde_at_warmup=use_sde_at_warmup,
-            optimize_memory_usage=optimize_memory_usage,
-            supported_action_spaces=(spaces.Box,),
-            support_multi_env=True,
-            #
-            use_original_space=use_original_space,
-            warmup_zero_action=warmup_zero_action,
+            AlgoCN(
+                learning_rate,
+                buffer_size,
+                learning_starts,
+                batch_size,
+                tau,
+                gamma,
+                train_freq,
+                gradient_steps,
+                action_noise,
+                replay_buffer_class=replay_buffer_class,
+                replay_buffer_kwargs=replay_buffer_kwargs,
+                policy_kwargs=policy_kwargs,
+                stats_window_size=stats_window_size,
+                tensorboard_log=tensorboard_log,
+                verbose=verbose,
+                device=device,
+                seed=seed,
+                use_sde=use_sde,
+                sde_sample_freq=sde_sample_freq,
+                use_sde_at_warmup=use_sde_at_warmup,
+                optimize_memory_usage=optimize_memory_usage,
+                supported_action_spaces=(spaces.Box,),
+                support_multi_env=True,
+                use_original_space=use_original_space,
+                warmup_zero_action=warmup_zero_action,
+            ),
+            FoundationModelCN(
+                **foundationCN 
+            ) 
         )
 
         self.target_entropy = target_entropy

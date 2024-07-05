@@ -30,8 +30,9 @@ from improve.wrapper.simpler.rescale import RTXRescaleWrapper
 from improve.wrapper.wandb.vec import WandbVecMonitor
 from mani_skill2.utils.wrappers import RecordEpisode
 from omegaconf import OmegaConf as OC
-from stable_baselines3 import A2C, SAC
-from improve.sb3.custom import PPO
+from stable_baselines3 import A2C
+from improve.sb3.custom.ppo import PPO
+from improve.sb3.custom.sac import SAC
 from stable_baselines3.common.callbacks import (CallbackList,
                                                 CheckpointCallback,
                                                 EvalCallback)
@@ -179,7 +180,9 @@ def main(cfg):
     # args = parse_args()
     num_envs = cfg.env.n_envs
     max_episode_steps = cfg.env.max_episode_steps
-    log_dir = osp.join(cfg.callback.log_path, wandb.run.name)
+    
+
+    # log_dir = osp.join(cfg.callback.log_path, wandb.run.name)
     rollout_steps = cfg.algo.get("n_steps", None) or 4800
 
     if cfg.job.seed is not None:
@@ -196,14 +199,16 @@ def main(cfg):
 
     eval_only = not cfg.train.use_train
     # create eval environment
-    if eval_only:
-        record_dir = osp.join(log_dir, "videos/eval")
-    else:
-        record_dir = osp.join(log_dir, "videos")
+    # if eval_only:
+    #     record_dir = osp.join(log_dir, "videos/eval")
+    # # else:
+    #     record_dir = osp.join(log_dir, "videos")
 
     if cfg.env.foundation.name is None:
         eval_env = SubprocVecEnv(
-            [make_env(cfg, record_dir=record_dir) for _ in range(1)]
+            [make_env(cfg, 
+                    #   record_dir=record_dir
+                    ) for _ in range(1)]
         )
         eval_env = VecMonitor(eval_env)  # attach this so SB3 can log reward metrics
         eval_env.seed(cfg.job.seed)
@@ -232,7 +237,7 @@ def main(cfg):
             [
                 make_env(
                     cfg,
-                    record_dir=record_dir,
+                    # record_dir=record_dir,
                     max_episode_steps=max_episode_steps,
                 )
                 for _ in range(1)
@@ -273,7 +278,7 @@ def main(cfg):
                 batch_size=400,
                 gamma=0.8,
                 n_epochs=15,
-                tensorboard_log=log_dir,
+                # tensorboard_log=log_dir,
             )
         )
 
@@ -288,6 +293,7 @@ def main(cfg):
         env,
         **algo_kwargs,
         policy_kwargs=policy_kwargs,
+        foundationCN=cfg.env.foundation
     )
 
     print(model.policy)
@@ -297,67 +303,69 @@ def main(cfg):
 
     n_eval = 1 if (cfg.env.seed.force and cfg.env.seed.seeds is None) else 10
 
-    if eval_only:
-        model_path = cfg.job.name
-        if model_path is None:
-            model_path = osp.join(log_dir, "latest_model")
-        # Load the saved model
-        model = model.load(model_path)
+    # if eval_only:
+    #     model_path = cfg.job.name
+    #     if model_path is None:
+            # model_path = osp.join(log_dir, "latest_model")
+    #     # Load the saved model
+    #     model = model.load(model_path)
 
-    else:
+    # else:
         # define callbacks to periodically save our model and evaluate it to help monitor training
         # the below freq values will save every 10 rollouts
 
         # this might negatively affect training
-        post_eval = (
-            util.ReZeroAfterFailure(threshold=0.2, verbose=1)
-            if cfg.train.use_zero_init
-            else None
+    post_eval = (
+        util.ReZeroAfterFailure(threshold=0.2, verbose=1)
+        if cfg.train.use_zero_init
+        else None
+    )
+
+    eval_callback = EvalCallback(
+        eval_env,
+        callback_after_eval=None,
+        # best_model_save_path=log_dir,
+        # log_path=log_dir,
+        eval_freq=5 * rollout_steps // num_envs,
+        deterministic=True,
+        render=True,
+        n_eval_episodes=n_eval,
+    )
+
+    checkpoint_callback = CheckpointCallback(
+        save_freq=10 * rollout_steps // num_envs,
+        save_path="~",
+        name_prefix="rl_model",
+        save_replay_buffer=True,
+        save_vecnormalize=True,
+    )
+
+    callbacks = [checkpoint_callback, eval_callback]
+
+    if cfg.job.wandb.use:
+        wandbCb = WandbCallback(
+            gradient_save_freq=rollout_steps // num_envs,
+            log="gradients",
+            verbose=2,
         )
+        callbacks += [wandbCb]
 
-        eval_callback = EvalCallback(
-            eval_env,
-            callback_after_eval=None,
-            best_model_save_path=log_dir,
-            log_path=log_dir,
-            eval_freq=5 * rollout_steps // num_envs,
-            deterministic=True,
-            render=True,
-            n_eval_episodes=n_eval,
-        )
+    if cfg.train.use_zero_init:
+        util.zero_init(model, cfg.algo.name)
 
-        checkpoint_callback = CheckpointCallback(
-            save_freq=10 * rollout_steps // num_envs,
-            save_path=log_dir,
-            name_prefix="rl_model",
-            save_replay_buffer=True,
-            save_vecnormalize=True,
-        )
-
-        callbacks = [checkpoint_callback, eval_callback]
-
-        if cfg.job.wandb.use:
-            wandbCb = WandbCallback(
-                gradient_save_freq=rollout_steps // num_envs,
-                log="gradients",
-                verbose=2,
-            )
-            callbacks += [wandbCb]
-
-        if cfg.train.use_zero_init:
-            util.zero_init(model, cfg.algo.name)
-
-        print("Training model")
-        # Train an agent with PPO for args.total_timesteps interactions
-        model.learn(
-            cfg.train.n_steps,
-            callback=callbacks,
-            progress_bar=True,
-        )
+    print("Training model")
+    # Train an agent with PPO for args.total_timesteps interactions
+    model.learn(
+        cfg.train.n_steps,
+        callback=callbacks,
+        progress_bar=True,
+    )
         # Save the final model
-        model.save(osp.join(log_dir, "latest_model"))
+        # model.save(osp.join(log_dir, "latest_model"))
 
     # Evaluate the model
+    
+    
     returns, ep_lens = evaluate_policy(
         model,
         eval_env,
